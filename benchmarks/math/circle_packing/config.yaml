@@ -8,9 +8,9 @@ max_solution_length: 60000
 llm:
   api_base: https://api.openai.com/v1
   models:
-    - name: "gpt-5"
+    - name: "gpt-4o-mini"
       weight: 1.0
-  max_tokens: 32000
+  max_tokens: 16384
   timeout: 600
 prompt:
   system_message: 'You are an expert mathematician specializing in circle packing problems and computational geometry. Your
@@ -44,3 +44,11 @@ evaluator:
   - 0.3
   - 0.6
 
+# Live monitor dashboard
+monitor:
+  enabled: true
+  port: 8765
+  host: "127.0.0.1"
+
+# Human feedback
+human_feedback_enabled: true
