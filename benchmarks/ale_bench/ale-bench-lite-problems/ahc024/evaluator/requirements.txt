@@ -1,2 +1,6 @@
-ale-bench
-ale-bench-eval
+# ale-bench and ale-bench-eval are not on PyPI.
+# Install them per the ALE-Bench documentation before building this image.
+# e.g.: pip install ale-bench ale-bench-eval
+# or copy the wheel files into this directory and use:
+# ale_bench-*.whl
+# ale_bench_eval-*.whl
