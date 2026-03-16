@@ -105,6 +105,12 @@ class ContainerizedEvaluator:
             finally:
                 self.container_id = None
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
     def __del__(self):
         """Safety net: stop the container if close() was never called."""
         try:
