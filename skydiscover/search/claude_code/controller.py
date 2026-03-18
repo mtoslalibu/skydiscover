@@ -385,6 +385,26 @@ class ClaudeCodeController(DiscoveryController):
                                 break
                     finally:
                         proc.wait()
+                        # Drain any bytes left in the stdout pipe after we broke
+                        # from the reading loop (e.g. the result event emitted by
+                        # Claude Code just as the hard stop fired).  Capturing it
+                        # here gives us authoritative turn count and cost.
+                        try:
+                            for remaining_line in proc.stdout:
+                                log_file.write(remaining_line.decode("utf-8", errors="replace"))
+                                log_file.flush()
+                                try:
+                                    evt = json.loads(remaining_line)
+                                    if evt.get("type") == "result":
+                                        seg_turns = evt.get("num_turns", 0)
+                                        cumulative_turns += seg_turns
+                                        seg_cost = evt.get("total_cost_usd", 0) or 0
+                                        if seg_cost > total_cost_usd:
+                                            total_cost_usd = seg_cost
+                                except (json.JSONDecodeError, ValueError):
+                                    pass
+                        except OSError:
+                            pass
                         _write_progress(
                             f"Process exited (code {proc.returncode}),"
                             f" cumulative turns: {cumulative_turns}"
