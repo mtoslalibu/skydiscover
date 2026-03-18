@@ -308,6 +308,7 @@ class ClaudeCodeController(DiscoveryController):
             def _run_with_turn_limit() -> None:
                 nonlocal cumulative_turns, total_cost_usd, stream_turns
                 start = time.monotonic()
+                hard_stop_at = 0.0  # monotonic time when hard stop was triggered
                 with open(log_path, "w") as log_file:
                     proc = subprocess.Popen(
                         cmd, stdout=subprocess.PIPE, stderr=log_file
@@ -320,60 +321,65 @@ class ClaudeCodeController(DiscoveryController):
                             try:
                                 evt = json.loads(raw_line)
                             except (json.JSONDecodeError, ValueError):
-                                continue
-                            evt_type = evt.get("type")
+                                pass
+                            else:
+                                evt_type = evt.get("type")
 
-                            if evt_type == "assistant":
-                                elapsed = time.monotonic() - start
-                                content = evt.get("message", {}).get("content", [])
-                                tool_names = [
-                                    c.get("name", "")
-                                    for c in content
-                                    if c.get("type") == "tool_use"
-                                ]
-                                if tool_names:
-                                    # Each assistant message with tool_use = one turn.
-                                    # Count these live so we have a hard stop even if
-                                    # --max-turns or the result event fails.
-                                    stream_turns += 1
-                                    _write_progress(
-                                        f"Active → {', '.join(tool_names)}"
-                                        f" (elapsed {elapsed:.0f}s,"
-                                        f" turn {stream_turns}/{max_turns})"
-                                    )
-                                    if stream_turns > max_turns:
-                                        # Hard stop fires at N+1 (not N) so that
-                                        # Claude Code's own --max-turns N fires first,
-                                        # emitting the result event with authoritative
-                                        # turn count and cost before we kill.
+                                if evt_type == "assistant":
+                                    elapsed = time.monotonic() - start
+                                    content = evt.get("message", {}).get("content", [])
+                                    tool_names = [
+                                        c.get("name", "")
+                                        for c in content
+                                        if c.get("type") == "tool_use"
+                                    ]
+                                    if tool_names:
+                                        # Each tool-use assistant message = one turn.
+                                        stream_turns += 1
                                         _write_progress(
-                                            f"Hard stop: stream turn count"
-                                            f" {stream_turns} exceeded {max_turns} — killing"
+                                            f"Active → {', '.join(tool_names)}"
+                                            f" (elapsed {elapsed:.0f}s,"
+                                            f" turn {stream_turns}/{max_turns})"
+                                        )
+                                        if stream_turns > max_turns and not hard_stop_at:
+                                            # Budget exceeded: don't SIGKILL immediately.
+                                            # Keep reading so the result event (with
+                                            # authoritative turn count and cost) can
+                                            # arrive before we kill.  Force-kill after
+                                            # 30 s if result never comes.
+                                            hard_stop_at = time.monotonic()
+                                            _write_progress(
+                                                f"Hard stop: stream turn {stream_turns}"
+                                                f" exceeded {max_turns} — waiting for result"
+                                            )
+
+                                elif evt_type == "result":
+                                    seg_turns = evt.get("num_turns", 0)
+                                    cumulative_turns += seg_turns
+                                    seg_cost = evt.get("total_cost_usd", 0) or 0
+                                    if seg_cost > total_cost_usd:
+                                        total_cost_usd = seg_cost
+                                    subtype = evt.get("subtype", "")
+                                    _write_progress(
+                                        f"Segment done ({subtype}): "
+                                        f"+{seg_turns} turns, "
+                                        f"{cumulative_turns}/{max_turns} cumulative, "
+                                        f"cost=${total_cost_usd:.4f}"
+                                    )
+                                    if cumulative_turns >= max_turns or hard_stop_at:
+                                        _write_progress(
+                                            f"Turn budget reached — stopping"
                                         )
                                         proc.kill()
                                         break
 
-                            elif evt_type == "result":
-                                # result fires once per claude -p segment; num_turns
-                                # is the authoritative turn count for that segment.
-                                seg_turns = evt.get("num_turns", 0)
-                                cumulative_turns += seg_turns
-                                seg_cost = evt.get("total_cost_usd", 0) or 0
-                                if seg_cost > total_cost_usd:
-                                    total_cost_usd = seg_cost
-                                subtype = evt.get("subtype", "")
+                            # Hard stop grace-period expired: force kill.
+                            if hard_stop_at and time.monotonic() - hard_stop_at > 30:
                                 _write_progress(
-                                    f"Segment done ({subtype}): "
-                                    f"+{seg_turns} turns, "
-                                    f"{cumulative_turns}/{max_turns} cumulative, "
-                                    f"cost=${total_cost_usd:.4f}"
+                                    f"Hard stop grace period elapsed — force killing"
                                 )
-                                if cumulative_turns >= max_turns:
-                                    _write_progress(
-                                        f"Turn budget ({max_turns}) exhausted — stopping"
-                                    )
-                                    proc.kill()
-                                    break
+                                proc.kill()
+                                break
 
                             # Wall-clock safety net.
                             elapsed = time.monotonic() - start
