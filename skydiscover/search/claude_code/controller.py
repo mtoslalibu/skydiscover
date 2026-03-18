@@ -302,10 +302,11 @@ class ClaudeCodeController(DiscoveryController):
             # Shared state modified only from the executor thread.
             cumulative_turns = 0
             total_cost_usd = 0.0
+            stream_turns = 0  # live tool-use turn count; fallback when result never fires
             run_start = time.monotonic()
 
             def _run_with_turn_limit() -> None:
-                nonlocal cumulative_turns, total_cost_usd
+                nonlocal cumulative_turns, total_cost_usd, stream_turns
                 start = time.monotonic()
                 with open(log_path, "w") as log_file:
                     proc = subprocess.Popen(
@@ -316,33 +317,41 @@ class ClaudeCodeController(DiscoveryController):
                             log_file.write(raw_line.decode("utf-8", errors="replace"))
                             log_file.flush()
 
-                            # Parse stream-json events.  --max-turns is per-segment
-                            # (Claude resets the budget after context compaction), so
-                            # we track cumulative turns from result events across all
-                            # segments to enforce the GLOBAL budget.
                             try:
                                 evt = json.loads(raw_line)
                             except (json.JSONDecodeError, ValueError):
                                 continue
                             evt_type = evt.get("type")
 
-                            # Log tool calls so the user can follow along in
-                            # progress.log.  We don't use assistant events for turn
-                            # counting because a single logical turn may produce
-                            # multiple assistant messages (e.g. thinking + tool use).
                             if evt_type == "assistant":
                                 elapsed = time.monotonic() - start
+                                content = evt.get("message", {}).get("content", [])
                                 tool_names = [
                                     c.get("name", "")
-                                    for c in evt.get("message", {}).get("content", [])
+                                    for c in content
                                     if c.get("type") == "tool_use"
                                 ]
                                 if tool_names:
+                                    # Each assistant message with tool_use = one turn.
+                                    # Count these live so we have a hard stop even if
+                                    # --max-turns or the result event fails.
+                                    stream_turns += 1
                                     _write_progress(
                                         f"Active → {', '.join(tool_names)}"
                                         f" (elapsed {elapsed:.0f}s,"
-                                        f" turns so far ~{cumulative_turns})"
+                                        f" turn {stream_turns}/{max_turns})"
                                     )
+                                    if stream_turns > max_turns:
+                                        # Hard stop fires at N+1 (not N) so that
+                                        # Claude Code's own --max-turns N fires first,
+                                        # emitting the result event with authoritative
+                                        # turn count and cost before we kill.
+                                        _write_progress(
+                                            f"Hard stop: stream turn count"
+                                            f" {stream_turns} exceeded {max_turns} — killing"
+                                        )
+                                        proc.kill()
+                                        break
 
                             elif evt_type == "result":
                                 # result fires once per claude -p segment; num_turns
@@ -426,7 +435,31 @@ class ClaudeCodeController(DiscoveryController):
 
             await run_future  # propagate exceptions
 
-            # Final evaluation.
+            # actual_turns: prefer authoritative count from result events; fall back
+            # to the live stream_turns count (used when process was hard-killed before
+            # result fired).
+            actual_turns = cumulative_turns if cumulative_turns > 0 else stream_turns
+
+            # cost: comes from result event; if process was hard-killed scan log for
+            # any result event that may have been written before death.
+            if total_cost_usd == 0.0:
+                try:
+                    for line in log_path.read_text(errors="replace").splitlines():
+                        try:
+                            evt = json.loads(line)
+                            if evt.get("type") == "result":
+                                c = evt.get("total_cost_usd", 0) or 0
+                                if c > total_cost_usd:
+                                    total_cost_usd = c
+                                if cumulative_turns == 0:
+                                    actual_turns = max(actual_turns, evt.get("num_turns", 0))
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+                except OSError:
+                    pass
+
+            # Final evaluation: always re-evaluate the best solution on disk so the
+            # reported score is reproducible (re-running best_program.py gives same #).
             try:
                 final_code = solution_path.read_text()
             except OSError:
@@ -436,7 +469,7 @@ class ClaudeCodeController(DiscoveryController):
 
             program_id = str(uuid.uuid4())
             eval_result = await self.evaluator.evaluate_program(final_code, program_id)
-            final_iter = max(cumulative_turns, 1)
+            final_iter = max(actual_turns, 1)
 
             program = Program(
                 id=program_id,
@@ -448,7 +481,7 @@ class ClaudeCodeController(DiscoveryController):
                 other_context_ids=[],
                 metadata={
                     "claude_code_max_turns": max_turns,
-                    "actual_turns": cumulative_turns,
+                    "actual_turns": actual_turns,
                 },
                 artifacts=eval_result.artifacts,
             )
@@ -467,7 +500,7 @@ class ClaudeCodeController(DiscoveryController):
                 summary = {
                     "model": model,
                     "max_turns": max_turns,
-                    "actual_turns": cumulative_turns,
+                    "actual_turns": actual_turns,
                     "cost_usd": round(total_cost_usd, 4),
                     "wall_seconds": round(run_elapsed, 1),
                     "baseline_score": initial.metrics.get("combined_score") if initial and initial.metrics else None,
@@ -478,7 +511,7 @@ class ClaudeCodeController(DiscoveryController):
                     json.dumps(summary, indent=2, default=str) + "\n"
                 )
                 _write_progress(
-                    f"Run complete: turns={cumulative_turns}/{max_turns}, "
+                    f"Run complete: turns={actual_turns}/{max_turns}, "
                     f"cost=${total_cost_usd:.4f}, "
                     f"time={run_elapsed:.0f}s, "
                     f"score={eval_result.metrics.get('combined_score', '?')}"
