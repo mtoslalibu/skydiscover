@@ -384,7 +384,7 @@ class ClaudeCodeController(DiscoveryController):
             # Run process in a thread; poll solution file for checkpoints.
             run_future = loop.run_in_executor(None, _run_with_turn_limit)
             last_ckpt_content = initial_code
-            last_ckpt_iter = 0
+            ckpt_count = 0
             ckpt_interval = self.config.checkpoint_interval
 
             while not run_future.done():
@@ -397,7 +397,11 @@ class ClaudeCodeController(DiscoveryController):
                 if cur == last_ckpt_content or not cur.strip():
                     continue
                 last_ckpt_content = cur
-                iteration = max(cumulative_turns, last_ckpt_iter + 1)
+                ckpt_count += 1
+                # Use ckpt_count as the iteration proxy so checkpoint_callback
+                # fires reliably even during a single long segment where
+                # cumulative_turns stays 0 until the segment ends.
+                iteration = max(cumulative_turns, ckpt_count)
                 try:
                     pid = str(uuid.uuid4())
                     er = await self.evaluator.evaluate_program(cur, pid)
@@ -415,9 +419,8 @@ class ClaudeCodeController(DiscoveryController):
                     self.database.add(prog, iteration=iteration)
                     score = er.metrics.get("combined_score", "?")
                     _write_progress(f"[CHECKPOINT] turn ~{cumulative_turns}, score={score}")
-                    if checkpoint_callback and iteration >= last_ckpt_iter + ckpt_interval:
+                    if checkpoint_callback and ckpt_count % ckpt_interval == 0:
                         checkpoint_callback(iteration)
-                        last_ckpt_iter = iteration
                 except Exception:
                     logger.debug("Checkpoint eval failed", exc_info=True)
 
