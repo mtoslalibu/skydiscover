@@ -21,11 +21,12 @@ RUN npm install -g @anthropic-ai/claude-code
 RUN pip3 install --no-cache-dir \
     numpy scipy sympy \
     jax optax \
-    torch --index-url https://download.pytorch.org/whl/cpu \
     scikit-learn numba \
     pandas matplotlib plotly \
     networkx cvxpy autograd pymoo \
-    PyWavelets
+    PyWavelets \
+ && pip3 install --no-cache-dir \
+    torch --extra-index-url https://download.pytorch.org/whl/cpu
 
 # Non-root user for running Claude Code (it refuses --dangerously-skip-permissions
 # as root). Added to the docker group so it can talk to dockerd in DinD mode.
