@@ -36,23 +36,23 @@ echo "Batch 1 done."
 # echo "Batch 3 done."
 
 # ─────────────────────────────────────────────────────────────────────────────
-# BATCH 4 — minimizing / autocorr family
+# BATCH 4 — minimizing_max_min_dist
 # ─────────────────────────────────────────────────────────────────────────────
 
 # $CMD $BENCH/minimizing_max_min_dist/2/initial_program.py $BENCH/minimizing_max_min_dist/2/evaluator -c $BENCH/minimizing_max_min_dist/2/config.yaml -s $SEARCH -m $MODEL -i $ITERS -o $OUTDIR/minimizing_max_min_dist_2 &
 # $CMD $BENCH/minimizing_max_min_dist/3/initial_program.py $BENCH/minimizing_max_min_dist/3/evaluator -c $BENCH/minimizing_max_min_dist/3/config.yaml -s $SEARCH -m $MODEL -i $ITERS -o $OUTDIR/minimizing_max_min_dist_3 &
-# $CMD $BENCH/first_autocorr_ineq/initial_program.py       $BENCH/first_autocorr_ineq/evaluator       -c $BENCH/first_autocorr_ineq/config.yaml       -s $SEARCH -m $MODEL -i $ITERS -o $OUTDIR/first_autocorr_ineq       &
-# $CMD $BENCH/second_autocorr_ineq/initial_program.py      $BENCH/second_autocorr_ineq/evaluator      -c $BENCH/second_autocorr_ineq/config.yaml      -s $SEARCH -m $MODEL -i $ITERS -o $OUTDIR/second_autocorr_ineq      &
 
 # wait
 # echo "Batch 4 done."
 
 # ─────────────────────────────────────────────────────────────────────────────
-# BATCH 5 — erdos / third autocorr
+# BATCH 5 — autocorr family + erdos
 # ─────────────────────────────────────────────────────────────────────────────
 
-# $CMD $BENCH/third_autocorr_ineq/initial_program.py $BENCH/third_autocorr_ineq/evaluator -c $BENCH/third_autocorr_ineq/config.yaml -s $SEARCH -m $MODEL -i $ITERS -o $OUTDIR/third_autocorr_ineq &
-# $CMD $BENCH/erdos_min_overlap/initial_program.py   $BENCH/erdos_min_overlap/evaluator   -c $BENCH/erdos_min_overlap/config.yaml   -s $SEARCH -m $MODEL -i $ITERS -o $OUTDIR/erdos_min_overlap   &
+# $CMD $BENCH/first_autocorr_ineq/initial_program.py  $BENCH/first_autocorr_ineq/evaluator  -c $BENCH/first_autocorr_ineq/config.yaml  -s $SEARCH -m $MODEL -i $ITERS -o $OUTDIR/first_autocorr_ineq  &
+# $CMD $BENCH/second_autocorr_ineq/initial_program.py $BENCH/second_autocorr_ineq/evaluator -c $BENCH/second_autocorr_ineq/config.yaml -s $SEARCH -m $MODEL -i $ITERS -o $OUTDIR/second_autocorr_ineq &
+# $CMD $BENCH/third_autocorr_ineq/initial_program.py  $BENCH/third_autocorr_ineq/evaluator  -c $BENCH/third_autocorr_ineq/config.yaml  -s $SEARCH -m $MODEL -i $ITERS -o $OUTDIR/third_autocorr_ineq  &
+# $CMD $BENCH/erdos_min_overlap/initial_program.py    $BENCH/erdos_min_overlap/evaluator    -c $BENCH/erdos_min_overlap/config.yaml    -s $SEARCH -m $MODEL -i $ITERS -o $OUTDIR/erdos_min_overlap    &
 
 # wait
 # echo "Batch 5 done."
