@@ -16,6 +16,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN npm install -g @anthropic-ai/claude-code
 
+# Pre-install the full math toolkit so Claude has a capable Python environment
+# for all math benchmarks (optimization, signal processing, geometry, etc.).
+RUN pip3 install --no-cache-dir \
+    numpy scipy sympy \
+    jax optax \
+    torch --index-url https://download.pytorch.org/whl/cpu \
+    scikit-learn numba \
+    pandas matplotlib plotly \
+    networkx cvxpy autograd pymoo \
+    PyWavelets
+
 # Non-root user for running Claude Code (it refuses --dangerously-skip-permissions
 # as root). Added to the docker group so it can talk to dockerd in DinD mode.
 RUN useradd -m -s /bin/bash -G docker claude
