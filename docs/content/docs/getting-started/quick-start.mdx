@@ -252,7 +252,7 @@ SkyDiscover will mutate. Code outside the markers stays fixed.
 ## 5. Run the evolution
 
 ```bash
-skydiscover-run examples/text_similarity/initial_program.py \
+uv run skydiscover-run examples/text_similarity/initial_program.py \
   examples/text_similarity/evaluator/ \
   --config examples/text_similarity/config.yaml \
   --search best_of_n \
@@ -306,7 +306,7 @@ without any hand-tuning.
 To keep improving from where you left off:
 
 ```bash
-skydiscover-run examples/text_similarity/initial_program.py \
+uv run skydiscover-run examples/text_similarity/initial_program.py \
   examples/text_similarity/evaluator/ \
   --config examples/text_similarity/config.yaml \
   --search best_of_n --iterations 20 \
