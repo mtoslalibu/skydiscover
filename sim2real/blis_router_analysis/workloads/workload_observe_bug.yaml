@@ -1,0 +1,158 @@
+# workload_observe_bug: prefix_heavy with 2x input tokens
+#
+# Based on workload_glia_prefix_heavy.yaml with all input_distribution means,
+# std_devs, mins, and maxes doubled.
+
+version: "1"
+seed: 42
+category: language
+aggregate_rate: 85.0
+num_requests: 1500
+
+clients:
+  # --- Group A (dominant): 45% of traffic, bursty ---
+  - id: "dominant-batch"
+    slo_class: "batch"
+    rate_fraction: 0.45
+    streaming: false
+    arrival:
+      process: gamma
+      cv: 6.0
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 400
+        std_dev: 160
+        min: 50
+        max: 1000
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 100
+        std_dev: 45
+        min: 10
+        max: 300
+    prefix_group: "group-dominant"
+    prefix_length: 28672
+
+  # --- Group B: 18% ---
+  - id: "secondary-interactive"
+    slo_class: "interactive"
+    rate_fraction: 0.18
+    streaming: true
+    arrival:
+      process: gamma
+      cv: 4.0
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 280
+        std_dev: 110
+        min: 30
+        max: 760
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 70
+        std_dev: 30
+        min: 10
+        max: 220
+    prefix_group: "group-secondary"
+    prefix_length: 28672
+
+  # --- Group C: 12% ---
+  - id: "group-c"
+    slo_class: "interactive"
+    rate_fraction: 0.12
+    streaming: true
+    arrival:
+      process: gamma
+      cv: 4.0
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 220
+        std_dev: 90
+        min: 20
+        max: 640
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 60
+        std_dev: 28
+        min: 8
+        max: 200
+    prefix_group: "group-c"
+    prefix_length: 28672
+
+  # --- Group D: 10% ---
+  - id: "group-d"
+    slo_class: "interactive"
+    rate_fraction: 0.10
+    streaming: true
+    arrival:
+      process: gamma
+      cv: 4.0
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 240
+        std_dev: 100
+        min: 20
+        max: 660
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 55
+        std_dev: 25
+        min: 8
+        max: 180
+    prefix_group: "group-d"
+    prefix_length: 28672
+
+  # --- Group E: 8%, realtime ---
+  - id: "realtime-e"
+    slo_class: "realtime"
+    rate_fraction: 0.08
+    streaming: true
+    arrival:
+      process: poisson
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 160
+        std_dev: 60
+        min: 20
+        max: 400
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 35
+        std_dev: 18
+        min: 5
+        max: 110
+    prefix_group: "group-e"
+    prefix_length: 28672
+
+  # --- Group F: 7%, no prefix ---
+  - id: "no-prefix-f"
+    slo_class: "realtime"
+    rate_fraction: 0.07
+    streaming: true
+    arrival:
+      process: gamma
+      cv: 5.0
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 180
+        std_dev: 70
+        min: 20
+        max: 460
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 45
+        std_dev: 22
+        min: 5
+        max: 140

@@ -1,0 +1,163 @@
+# Hypothesis workload: amplify evolved router's advantage over 1:1
+#
+# Changes from workload_glia_prefix_heavy.yaml:
+#   1. Group A dominance: 45% -> 65% (more traffic funnels to one prefix group)
+#   2. Group A burstiness: CV 6.0 -> 10.0 (tighter bursts deepen the hotspot)
+#   3. Output tokens: mean 100 -> 280 (longer outputs hold instances longer,
+#      growing in-flight queue and amplifying the load delta the decay acts on)
+#
+# Other groups scaled down proportionally to keep rates summing to 1.0.
+
+version: "1"
+seed: 42
+category: language
+aggregate_rate: 85.0
+num_requests: 1500
+
+clients:
+  # --- Group A (dominant): 65% of traffic, very bursty, long outputs ---
+  - id: "dominant-batch"
+    slo_class: "batch"
+    rate_fraction: 0.55
+    streaming: false
+    arrival:
+      process: gamma
+      cv: 8.0
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 200
+        std_dev: 80
+        min: 25
+        max: 500
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 200
+        std_dev: 70
+        min: 50
+        max: 500
+    prefix_group: "group-dominant"
+    prefix_length: 14336
+
+  # --- Group B: 12% ---
+  - id: "secondary-interactive"
+    slo_class: "interactive"
+    rate_fraction: 0.15
+    streaming: true
+    arrival:
+      process: gamma
+      cv: 4.0
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 140
+        std_dev: 55
+        min: 15
+        max: 380
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 70
+        std_dev: 30
+        min: 10
+        max: 220
+    prefix_group: "group-secondary"
+    prefix_length: 14336
+
+  # --- Group C: 8% ---
+  - id: "group-c"
+    slo_class: "interactive"
+    rate_fraction: 0.10
+    streaming: true
+    arrival:
+      process: gamma
+      cv: 4.0
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 110
+        std_dev: 45
+        min: 10
+        max: 320
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 60
+        std_dev: 28
+        min: 8
+        max: 200
+    prefix_group: "group-c"
+    prefix_length: 14336
+
+  # --- Group D: 7% ---
+  - id: "group-d"
+    slo_class: "interactive"
+    rate_fraction: 0.09
+    streaming: true
+    arrival:
+      process: gamma
+      cv: 4.0
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 120
+        std_dev: 50
+        min: 10
+        max: 330
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 55
+        std_dev: 25
+        min: 8
+        max: 180
+    prefix_group: "group-d"
+    prefix_length: 14336
+
+  # --- Group E: 5%, realtime ---
+  - id: "realtime-e"
+    slo_class: "realtime"
+    rate_fraction: 0.07
+    streaming: true
+    arrival:
+      process: poisson
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 80
+        std_dev: 30
+        min: 10
+        max: 200
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 35
+        std_dev: 18
+        min: 5
+        max: 110
+    prefix_group: "group-e"
+    prefix_length: 14336
+
+  # --- Group F: 3%, no prefix ---
+  - id: "no-prefix-f"
+    slo_class: "realtime"
+    rate_fraction: 0.04
+    streaming: true
+    arrival:
+      process: gamma
+      cv: 5.0
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 90
+        std_dev: 35
+        min: 10
+        max: 230
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 45
+        std_dev: 22
+        min: 5
+        max: 140
