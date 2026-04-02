@@ -45,8 +45,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 WORKLOADS = [
-    ("glia_40qps", "workload_glia_40qps.yaml"),
-    ("prefix_heavy", "workload_glia_prefix_heavy.yaml"),
+    ("sweet", "workload_sweet.yaml"),
 ]
 
 # Model configs: (short_name, model_id, extra CLI args)

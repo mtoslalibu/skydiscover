@@ -20,10 +20,17 @@ llm:
 prompt:
   system_message: |
     You are optimizing a routing algorithm for a 4-instance LLM inference cluster.
-    Goal: minimize end-to-end latency across two workloads (general traffic + skewed prefix traffic).
+    Goal: minimize end-to-end latency on the sweet workload (bursty prefix-heavy traffic).
 
     BASELINE: 1:1 weighted router — fixed 0.5 prefix-affinity + 0.5 load-balance.
-    Strong on general traffic, but vulnerable when prefix groups have unequal rates.
+    Vulnerable to burst hotspotting: all dominant-group traffic routes to one cached instance,
+    causing a massive pileup during spikes.
+
+    WORKLOAD (sweet): 125 QPS, 4 instances, 14336-token prefixes.
+      Group A (45%, CV=9 gamma bursts): dominant prefix group, batch, output ~90 tokens.
+        During CV=9 bursts, momentary rate spikes to ~9x mean — all routed to one instance by 1:1.
+      Groups B-E (18/12/10/9%): secondary prefix groups, interactive/realtime, moderate burstiness.
+      Group F (9%): no prefix, realtime.
 
     SCORERS (from routing_policy.yaml, loaded into ws.scorers/ws.weights):
       ws.scorers[0] (weight 0.5) — prefix-affinity: returns ~1.0 for cached instances, ~0.0 otherwise.
@@ -32,21 +39,21 @@ prompt:
 
     KEY SIGNALS:
       snap.InFlightRequests — FRESH (updated before every routing call). Best load signal.
-      snap.KVUtilization — stale (5s), but useful as safety filter for memory pressure.
+      snap.KVUtilization — stale (5s). Bursts are short — KV lags behind. Use only as safety filter.
       snap.QueueDepth, snap.BatchSize — stale (5s). Avoid as primary load signal.
 
-    OPPORTUNITY: The prefix_heavy workload has 6 prefix groups with skewed rates (45/18/12/10/8/7%)
-    across 4 instances, with large prefixes (14336 tokens). The fixed 0.5/0.5 weight creates a
-    hotspot on the dominant group's instance. An adaptive algorithm that reduces prefix weight
-    when the cached instance is overloaded can beat the baseline by 15%+ here.
+    OPPORTUNITY: During CV=9 bursts, Group A floods the cached instance while others sit idle.
+    The fix: detect the load gap via InFlightRequests and decay the prefix-affinity weight
+    proportionally. During calm periods, preserve full affinity (cache hits are valuable).
+    An algorithm that does this correctly can beat the baseline by 25%+ on this workload.
 
     RULES:
     1. Only modify code between EVOLVE-BLOCK-START and EVOLVE-BLOCK-END
     2. Valid Go — guard divisions against zero
     3. scores[snap.ID] must be set for every instance; bestIdx must be valid
-    4. Don't remove load-balancing entirely — it prevents starvation on general traffic
+    4. Don't remove load-balancing entirely — it prevents starvation
 
-    Score = mean % improvement over baseline across both workloads. Positive = better.
+    Score = % improvement over baseline on sweet workload. Positive = better.
 
 search:
   type: "adaevolve"

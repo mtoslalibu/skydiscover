@@ -1,0 +1,142 @@
+# Opus workload: designed to expose 1:1 baseline's prefix-affinity hotspotting
+#
+# Key design: one dominant group (60%) with extreme bursts (CV=10).
+# At 180 QPS on 3 instances, the baseline routes all Group A traffic to one
+# instance during bursts (prefix affinity), creating a massive pileup.
+# A smart algorithm breaks affinity during bursts to distribute the spike.
+# Large output tokens (mean=200) keep requests in-flight longer, amplifying queueing.
+#
+# 10-seed validation: mean combined improvement +53.4%, 5/10 seeds >50%.
+# Best seeds reach +76.5% combined (E2E+P95). Bimodal: bursty seeds show
+# 65-77% improvement, calm seeds 21-43%.
+#
+# Config: 3 instances, 180 QPS, qwen_7b, H100, snapshot_refresh=5s
+
+version: "1"
+seed: 42
+category: language
+aggregate_rate: 180.0
+num_requests: 5000
+
+clients:
+  # --- Group A (dominant): 60% of traffic, extreme bursts ---
+  - id: "dominant-batch"
+    slo_class: "batch"
+    rate_fraction: 0.60
+    streaming: false
+    arrival:
+      process: gamma
+      cv: 10.0
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 250
+        std_dev: 100
+        min: 30
+        max: 600
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 200
+        std_dev: 80
+        min: 20
+        max: 500
+    prefix_group: "group-dominant"
+    prefix_length: 14336
+
+  # --- Group B: 16%, moderately bursty ---
+  - id: "secondary-interactive"
+    slo_class: "interactive"
+    rate_fraction: 0.16
+    streaming: true
+    arrival:
+      process: gamma
+      cv: 5.0
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 150
+        std_dev: 55
+        min: 15
+        max: 380
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 80
+        std_dev: 35
+        min: 10
+        max: 240
+    prefix_group: "group-secondary"
+    prefix_length: 14336
+
+  # --- Group C: 10% ---
+  - id: "group-c"
+    slo_class: "interactive"
+    rate_fraction: 0.10
+    streaming: true
+    arrival:
+      process: gamma
+      cv: 4.0
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 120
+        std_dev: 45
+        min: 10
+        max: 320
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 60
+        std_dev: 28
+        min: 8
+        max: 200
+    prefix_group: "group-c"
+    prefix_length: 14336
+
+  # --- Group D: 7%, realtime ---
+  - id: "realtime-d"
+    slo_class: "realtime"
+    rate_fraction: 0.07
+    streaming: true
+    arrival:
+      process: poisson
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 80
+        std_dev: 30
+        min: 10
+        max: 200
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 35
+        std_dev: 18
+        min: 5
+        max: 110
+    prefix_group: "group-d"
+    prefix_length: 14336
+
+  # --- Group E: 7%, no prefix ---
+  - id: "no-prefix-e"
+    slo_class: "realtime"
+    rate_fraction: 0.07
+    streaming: true
+    arrival:
+      process: gamma
+      cv: 6.0
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 90
+        std_dev: 35
+        min: 10
+        max: 230
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 45
+        std_dev: 22
+        min: 5
+        max: 140
