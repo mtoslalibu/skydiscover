@@ -36,7 +36,11 @@ DEFAULT_SNAPSHOT_REFRESH = 5_000_000  # 5s in microseconds
 
 # Markers in routing.go that delimit the replaceable block
 BLOCK_START = "// Compute composite scores from all scorers"
+# End marker: the closing brace of the "if len(tied) > 1" block, one line
+# after the bestIdx assignment. We match this line to capture the full block.
 BLOCK_END_MARKER = "bestIdx = tied[ws.rng.Intn(len(tied))]"
+# We need to skip one extra line after the marker (the closing "}")
+BLOCK_END_SKIP_LINES = 1
 
 
 def find_workloads(workload_filter: list[str] | None) -> list[Path]:
@@ -117,18 +121,21 @@ def patch_routing_go_oracle():
     original = ROUTING_GO.read_text()
     oracle_code = ORACLE_GO.read_text()
 
-    # Strip the comment header from oracle_router.go (lines starting with //)
-    oracle_lines = oracle_code.split('\n')
-    code_start = 0
-    for i, line in enumerate(oracle_lines):
-        stripped = line.strip()
-        if stripped and not stripped.startswith('//'):
-            code_start = i
-            break
-    oracle_body = '\n'.join(oracle_lines[code_start:]).strip()
+    # Extract only the oracle algorithm block between ORACLE-START and ORACLE-END markers.
+    # oracle_router.go is a full routing.go copy; we only want the replacement block.
+    oracle_start_marker = "// ORACLE-START"
+    oracle_end_marker = "// ORACLE-END"
+    os_idx = oracle_code.find(oracle_start_marker)
+    oe_idx = oracle_code.find(oracle_end_marker)
+    if os_idx == -1 or oe_idx == -1:
+        raise RuntimeError("Could not find ORACLE-START/ORACLE-END markers in oracle_router.go")
+    # Include everything from ORACLE-START line through the line before ORACLE-END
+    os_line_start = oracle_code.rfind('\n', 0, os_idx) + 1
+    oe_line_end = oracle_code.index('\n', oe_idx) + 1
+    oracle_body = oracle_code[os_line_start:oe_line_end].rstrip()
 
-    # Indent oracle body to match the function (one tab)
-    indented = '\n'.join('\t' + line if line.strip() else '' for line in oracle_body.split('\n'))
+    # The oracle body is already indented with tabs from the full file — use as-is.
+    indented = oracle_body
 
     # Find and replace the block between BLOCK_START and BLOCK_END_MARKER
     start_idx = original.find(BLOCK_START)
@@ -136,8 +143,10 @@ def patch_routing_go_oracle():
     if start_idx == -1 or end_idx == -1:
         raise RuntimeError("Could not find scoring block markers in routing.go")
 
-    # Include the end marker line
+    # Include the end marker line + closing brace line after it
     end_idx = original.index('\n', end_idx) + 1
+    for _ in range(BLOCK_END_SKIP_LINES):
+        end_idx = original.index('\n', end_idx) + 1
 
     # Find the start of the line containing BLOCK_START
     line_start = original.rfind('\n', 0, start_idx) + 1
