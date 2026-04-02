@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """
-Benchmark: Oracle adaptive router vs Default BLIS router.
+Benchmark: Default vs Glia vs Oracle BLIS routers.
 
-Runs both routers against all workload YAMLs and reports E2E mean/P95
-improvement across multiple seeds.
+Runs all three routers against workload_v1.yaml and reports E2E mean/P95
+latency with improvement percentages across multiple seeds.
+
+Algorithms:
+  - Default: Static weighted scoring (prefix-affinity:3, queue-depth:2, kv-utilization:2)
+  - Glia HRA: KV-cache headroom allocator (projects block usage, scores by remaining headroom)
+  - Oracle: Adaptive affinity decay (decays prefix-affinity weight based on IFR imbalance)
 
 Usage:
-    python benchmark.py                          # run with defaults
+    python benchmark.py                          # run with defaults (5 seeds)
     python benchmark.py --seeds 42,123,456       # custom seeds
     python benchmark.py --workloads workload_v1.yaml  # single workload
     python benchmark.py --instances 4            # custom instance count
@@ -14,11 +19,9 @@ Usage:
 
 import argparse
 import json
-import os
 import re
 import subprocess
 import sys
-import textwrap
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -26,9 +29,9 @@ BLIS_ROUTER_DIR = SCRIPT_DIR.parent
 SIM_DIR = BLIS_ROUTER_DIR / "inference-sim"
 ROUTING_GO = SIM_DIR / "sim" / "routing.go"
 ORACLE_GO = SCRIPT_DIR / "oracle_router.go"
+GLIA_GO = SCRIPT_DIR / "baseline_glia.go"
 # Use the local oracle copy of the workload (workload_v1.yaml in this directory).
-# Falls back to the shared workloads/ dir if no local copy exists.
-WORKLOADS_DIR = SCRIPT_DIR  # oracle/ directory contains workload_v1.yaml
+WORKLOADS_DIR = SCRIPT_DIR
 
 DEFAULT_SEEDS = [42, 123, 456, 789, 1337]
 DEFAULT_INSTANCES = 4
@@ -36,10 +39,8 @@ DEFAULT_SNAPSHOT_REFRESH = 5_000_000  # 5s in microseconds
 
 # Markers in routing.go that delimit the replaceable block
 BLOCK_START = "// Compute composite scores from all scorers"
-# End marker: the closing brace of the "if len(tied) > 1" block, one line
-# after the bestIdx assignment. We match this line to capture the full block.
 BLOCK_END_MARKER = "bestIdx = tied[ws.rng.Intn(len(tied))]"
-# We need to skip one extra line after the marker (the closing "}")
+# Skip one extra line after the marker (the closing "}" of the if block)
 BLOCK_END_SKIP_LINES = 1
 
 
@@ -63,10 +64,12 @@ def find_workloads(workload_filter: list[str] | None) -> list[Path]:
 def build_blis() -> Path:
     """Build the blis binary, return path."""
     binary = SIM_DIR / "blis"
-    subprocess.run(
+    result = subprocess.run(
         ["go", "build", "-o", str(binary), "main.go"],
-        cwd=SIM_DIR, check=True, capture_output=True, text=True, timeout=60,
+        cwd=SIM_DIR, check=False, capture_output=True, text=True, timeout=60,
     )
+    if result.returncode != 0:
+        raise RuntimeError(f"Go build failed:\n{result.stderr}")
     return binary
 
 
@@ -105,7 +108,6 @@ def run_blis(
 
 def parse_cluster_metrics(output: str) -> dict | None:
     """Extract cluster-level metrics from blis JSON output."""
-    # Split on JSON object boundaries and find cluster block
     for match in re.finditer(r'\{[^{}]+\}', output):
         try:
             obj = json.loads(match.group())
@@ -116,28 +118,26 @@ def parse_cluster_metrics(output: str) -> dict | None:
     return None
 
 
-def patch_routing_go_oracle():
-    """Replace the scoring block in routing.go with oracle code."""
+def _extract_block(source_file: Path, start_marker: str, end_marker: str) -> str:
+    """Extract code between start_marker and end_marker lines from a Go source file."""
+    code = source_file.read_text()
+    si = code.find(start_marker)
+    ei = code.find(end_marker)
+    if si == -1 or ei == -1:
+        raise RuntimeError(f"Could not find {start_marker}/{end_marker} in {source_file.name}")
+    # Include from start-of-line containing start_marker through end-of-line containing end_marker
+    line_start = code.rfind('\n', 0, si) + 1
+    line_end = code.index('\n', ei) + 1
+    return code[line_start:line_end].rstrip()
+
+
+def patch_routing_go(algo_block: str) -> str:
+    """Replace the scoring block in routing.go with the given algorithm code.
+
+    Returns the original routing.go content for restoration.
+    """
     original = ROUTING_GO.read_text()
-    oracle_code = ORACLE_GO.read_text()
 
-    # Extract only the oracle algorithm block between ORACLE-START and ORACLE-END markers.
-    # oracle_router.go is a full routing.go copy; we only want the replacement block.
-    oracle_start_marker = "// ORACLE-START"
-    oracle_end_marker = "// ORACLE-END"
-    os_idx = oracle_code.find(oracle_start_marker)
-    oe_idx = oracle_code.find(oracle_end_marker)
-    if os_idx == -1 or oe_idx == -1:
-        raise RuntimeError("Could not find ORACLE-START/ORACLE-END markers in oracle_router.go")
-    # Include everything from ORACLE-START line through the line before ORACLE-END
-    os_line_start = oracle_code.rfind('\n', 0, os_idx) + 1
-    oe_line_end = oracle_code.index('\n', oe_idx) + 1
-    oracle_body = oracle_code[os_line_start:oe_line_end].rstrip()
-
-    # The oracle body is already indented with tabs from the full file — use as-is.
-    indented = oracle_body
-
-    # Find and replace the block between BLOCK_START and BLOCK_END_MARKER
     start_idx = original.find(BLOCK_START)
     end_idx = original.find(BLOCK_END_MARKER)
     if start_idx == -1 or end_idx == -1:
@@ -151,7 +151,7 @@ def patch_routing_go_oracle():
     # Find the start of the line containing BLOCK_START
     line_start = original.rfind('\n', 0, start_idx) + 1
 
-    patched = original[:line_start] + indented + '\n' + original[end_idx:]
+    patched = original[:line_start] + algo_block + '\n' + original[end_idx:]
     ROUTING_GO.write_text(patched)
     return original
 
@@ -161,12 +161,31 @@ def restore_routing_go(original: str):
     ROUTING_GO.write_text(original)
 
 
+def run_algo_phase(name: str, binary: Path, workloads: list[Path],
+                   seeds: list[int], instances: int,
+                   results: dict, algo_key: str):
+    """Run an algorithm across all workloads and seeds, storing results."""
+    for wl in workloads:
+        wl_name = wl.stem
+        print(f"\n  Running {name} on {wl.name}...")
+        for seed in seeds:
+            if seed not in results[wl_name]:
+                results[wl_name][seed] = {}
+            metrics = run_blis(binary, wl, seed, instances)
+            if metrics:
+                results[wl_name][seed][algo_key] = metrics
+                print(f"    seed={seed}: e2e_mean={metrics['e2e_mean_ms']:.1f}ms, "
+                      f"p95={metrics['e2e_p95_ms']:.1f}ms")
+            else:
+                print(f"    seed={seed}: FAILED")
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Benchmark oracle vs default BLIS router")
+    parser = argparse.ArgumentParser(description="Benchmark default vs glia vs oracle BLIS router")
     parser.add_argument("--seeds", default=",".join(str(s) for s in DEFAULT_SEEDS),
                         help="Comma-separated seeds (default: 42,123,456,789,1337)")
     parser.add_argument("--workloads", nargs="*", default=None,
-                        help="Specific workload files to test (default: all in workloads/)")
+                        help="Specific workload files to test (default: all in oracle/)")
     parser.add_argument("--instances", type=int, default=DEFAULT_INSTANCES,
                         help="Number of instances (default: 4)")
     args = parser.parse_args()
@@ -183,97 +202,180 @@ def main():
     print(f"Instances: {args.instances}")
     print()
 
-    # === Phase 1: Build default binary and run baselines ===
-    print("Building default BLIS...")
-    default_binary = build_blis()
+    # Pre-extract algorithm blocks
+    oracle_block = _extract_block(ORACLE_GO, "// ORACLE-START", "// ORACLE-END")
+    glia_block = _extract_block(GLIA_GO, "// GLIA-START", "// GLIA-END")
 
-    results = {}  # {workload_name: {seed: {default: metrics, oracle: metrics}}}
-
+    results = {}  # {workload_name: {seed: {default: metrics, glia: metrics, oracle: metrics}}}
     for wl in workloads:
-        wl_name = wl.stem
-        results[wl_name] = {}
-        print(f"\n{'='*60}")
-        print(f"Workload: {wl.name}")
-        print(f"{'='*60}")
+        results[wl.stem] = {}
 
-        # Run default router
-        print("  Running default (pa:3, qd:2, kv:2)...")
-        for seed in seeds:
-            metrics = run_blis(default_binary, wl, seed, args.instances)
-            if metrics:
-                results[wl_name][seed] = {"default": metrics}
-                print(f"    seed={seed}: e2e_mean={metrics['e2e_mean_ms']:.1f}ms, "
-                      f"p95={metrics['e2e_p95_ms']:.1f}ms")
-            else:
-                print(f"    seed={seed}: FAILED")
+    # === Phase 1: Default router (no patching) ===
+    print("=" * 60)
+    print("Phase 1/3: Default router (pa:3, qd:2, kv:2)")
+    print("=" * 60)
+    default_binary = build_blis()
+    run_algo_phase("default", default_binary, workloads, seeds, args.instances, results, "default")
 
-    # === Phase 2: Patch routing.go with oracle, rebuild, run ===
-    print("\n\nPatching routing.go with oracle...")
-    original_routing = patch_routing_go_oracle()
+    # === Phase 2: Glia HRA (patch + rebuild) ===
+    print(f"\n{'=' * 60}")
+    print("Phase 2/3: Glia HRA (KV headroom allocator)")
+    print("=" * 60)
+    print("Patching routing.go with Glia...")
+    original = patch_routing_go(glia_block)
     try:
-        print("Building oracle BLIS...")
-        oracle_binary = build_blis()
-
-        for wl in workloads:
-            wl_name = wl.stem
-            print(f"\n  Running oracle on {wl.name}...")
-            for seed in seeds:
-                if seed not in results[wl_name]:
-                    continue
-                metrics = run_blis(oracle_binary, wl, seed, args.instances)
-                if metrics:
-                    results[wl_name][seed]["oracle"] = metrics
-                    print(f"    seed={seed}: e2e_mean={metrics['e2e_mean_ms']:.1f}ms, "
-                          f"p95={metrics['e2e_p95_ms']:.1f}ms")
-                else:
-                    print(f"    seed={seed}: FAILED")
+        glia_binary = build_blis()
+        run_algo_phase("glia", glia_binary, workloads, seeds, args.instances, results, "glia")
     finally:
         print("\nRestoring routing.go...")
-        restore_routing_go(original_routing)
-        # Rebuild clean binary
-        build_blis()
+        restore_routing_go(original)
 
-    # === Phase 3: Report ===
+    # === Phase 3: Oracle adaptive (patch + rebuild) ===
+    print(f"\n{'=' * 60}")
+    print("Phase 3/3: Oracle adaptive (IFR-based affinity decay)")
+    print("=" * 60)
+    print("Patching routing.go with Oracle...")
+    original = patch_routing_go(oracle_block)
+    try:
+        oracle_binary = build_blis()
+        run_algo_phase("oracle", oracle_binary, workloads, seeds, args.instances, results, "oracle")
+    finally:
+        print("\nRestoring routing.go...")
+        restore_routing_go(original)
+        build_blis()  # rebuild clean binary
+
+    # === Report ===
+    algos = ["default", "glia", "oracle"]
+    algo_labels = {
+        "default": "Default (pa:3,qd:2,kv:2)",
+        "glia": "Glia HRA",
+        "oracle": "Oracle (adaptive decay)",
+    }
+
     print("\n")
-    print("=" * 80)
-    print("RESULTS: Oracle vs Default BLIS Router")
-    print("=" * 80)
+    print("=" * 100)
+    print("RESULTS: Default vs Glia vs Oracle")
+    print("=" * 100)
 
     for wl_name, seed_results in results.items():
         print(f"\n--- {wl_name} ---")
-        print(f"{'Seed':>6} | {'Default E2E':>12} | {'Oracle E2E':>11} | {'Imp %':>7} | "
-              f"{'Default P95':>12} | {'Oracle P95':>11} | {'Imp %':>7}")
-        print("-" * 80)
 
-        e2e_improvements = []
-        p95_improvements = []
+        # Header
+        print(f"\n{'Seed':>6}", end="")
+        for algo in algos:
+            print(f" | {algo_labels[algo]:>26}", end="")
+        print()
+        print("-" * 100)
 
+        # Per-seed E2E mean
+        print(f"\nE2E Mean Latency (ms):")
+        per_algo_e2e = {a: [] for a in algos}
         for seed in seeds:
             if seed not in seed_results:
                 continue
             sr = seed_results[seed]
-            if "default" not in sr or "oracle" not in sr:
+            print(f"{seed:>6}", end="")
+            for algo in algos:
+                if algo in sr:
+                    val = sr[algo]["e2e_mean_ms"]
+                    per_algo_e2e[algo].append(val)
+                    print(f" | {val:>26.1f}", end="")
+                else:
+                    print(f" | {'FAILED':>26}", end="")
+            print()
+
+        # Mean row
+        print(f"{'MEAN':>6}", end="")
+        means_e2e = {}
+        for algo in algos:
+            vals = per_algo_e2e[algo]
+            if vals:
+                m = sum(vals) / len(vals)
+                means_e2e[algo] = m
+                print(f" | {m:>26.1f}", end="")
+            else:
+                print(f" | {'N/A':>26}", end="")
+        print()
+
+        # Per-seed P95
+        print(f"\nE2E P95 Latency (ms):")
+        per_algo_p95 = {a: [] for a in algos}
+        for seed in seeds:
+            if seed not in seed_results:
                 continue
+            sr = seed_results[seed]
+            print(f"{seed:>6}", end="")
+            for algo in algos:
+                if algo in sr:
+                    val = sr[algo]["e2e_p95_ms"]
+                    per_algo_p95[algo].append(val)
+                    print(f" | {val:>26.1f}", end="")
+                else:
+                    print(f" | {'FAILED':>26}", end="")
+            print()
 
+        # Mean row
+        print(f"{'MEAN':>6}", end="")
+        means_p95 = {}
+        for algo in algos:
+            vals = per_algo_p95[algo]
+            if vals:
+                m = sum(vals) / len(vals)
+                means_p95[algo] = m
+                print(f" | {m:>26.1f}", end="")
+            else:
+                print(f" | {'N/A':>26}", end="")
+        print()
+
+        # Improvement table vs default
+        if "default" in means_e2e:
+            print(f"\n% Improvement vs Default:")
+            print(f"{'':>6} | {'E2E Mean':>12} | {'P95':>12}")
+            print("-" * 40)
+            for algo in algos[1:]:  # skip default
+                if algo in means_e2e and algo in means_p95:
+                    e2e_imp = (1 - means_e2e[algo] / means_e2e["default"]) * 100
+                    p95_imp = (1 - means_p95[algo] / means_p95["default"]) * 100
+                    print(f"{algo_labels[algo]:>26} | {e2e_imp:>+11.1f}% | {p95_imp:>+11.1f}%")
+
+        # Per-seed improvement table
+        print(f"\nPer-seed % improvement vs Default:")
+        print(f"{'Seed':>6} | {'Glia E2E':>10} | {'Glia P95':>10} | {'Oracle E2E':>11} | {'Oracle P95':>11}")
+        print("-" * 65)
+        glia_e2e_imps, glia_p95_imps = [], []
+        oracle_e2e_imps, oracle_p95_imps = [], []
+        for seed in seeds:
+            if seed not in seed_results:
+                continue
+            sr = seed_results[seed]
+            if "default" not in sr:
+                continue
             d_e2e = sr["default"]["e2e_mean_ms"]
-            o_e2e = sr["oracle"]["e2e_mean_ms"]
             d_p95 = sr["default"]["e2e_p95_ms"]
-            o_p95 = sr["oracle"]["e2e_p95_ms"]
 
-            e2e_imp = (1 - o_e2e / d_e2e) * 100
-            p95_imp = (1 - o_p95 / d_p95) * 100
-            e2e_improvements.append(e2e_imp)
-            p95_improvements.append(p95_imp)
+            g_e2e_s = g_p95_s = o_e2e_s = o_p95_s = "N/A"
+            if "glia" in sr:
+                g_e2e = (1 - sr["glia"]["e2e_mean_ms"] / d_e2e) * 100
+                g_p95 = (1 - sr["glia"]["e2e_p95_ms"] / d_p95) * 100
+                g_e2e_s = f"{g_e2e:>+.1f}%"
+                g_p95_s = f"{g_p95:>+.1f}%"
+                glia_e2e_imps.append(g_e2e)
+                glia_p95_imps.append(g_p95)
+            if "oracle" in sr:
+                o_e2e = (1 - sr["oracle"]["e2e_mean_ms"] / d_e2e) * 100
+                o_p95 = (1 - sr["oracle"]["e2e_p95_ms"] / d_p95) * 100
+                o_e2e_s = f"{o_e2e:>+.1f}%"
+                o_p95_s = f"{o_p95:>+.1f}%"
+                oracle_e2e_imps.append(o_e2e)
+                oracle_p95_imps.append(o_p95)
 
-            print(f"{seed:>6} | {d_e2e:>10.1f}ms | {o_e2e:>9.1f}ms | {e2e_imp:>+6.1f}% | "
-                  f"{d_p95:>10.1f}ms | {o_p95:>9.1f}ms | {p95_imp:>+6.1f}%")
+            print(f"{seed:>6} | {g_e2e_s:>10} | {g_p95_s:>10} | {o_e2e_s:>11} | {o_p95_s:>11}")
 
-        if e2e_improvements:
-            mean_e2e = sum(e2e_improvements) / len(e2e_improvements)
-            mean_p95 = sum(p95_improvements) / len(p95_improvements)
-            print("-" * 80)
-            print(f"{'MEAN':>6} | {'':>12} | {'':>11} | {mean_e2e:>+6.1f}% | "
-                  f"{'':>12} | {'':>11} | {mean_p95:>+6.1f}%")
+        print("-" * 65)
+        def _mean(lst):
+            return f"{sum(lst)/len(lst):>+.1f}%" if lst else "N/A"
+        print(f"{'MEAN':>6} | {_mean(glia_e2e_imps):>10} | {_mean(glia_p95_imps):>10} | "
+              f"{_mean(oracle_e2e_imps):>11} | {_mean(oracle_p95_imps):>11}")
 
     # Save JSON results
     output_path = SCRIPT_DIR / "benchmark_results.json"
