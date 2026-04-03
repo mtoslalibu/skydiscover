@@ -45,7 +45,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 WORKLOADS = [
-    ("sweet", "workload_sweet.yaml"),
+    ("v1", "workload_v1.yaml"),
 ]
 
 # Model configs: (short_name, model_id, extra CLI args)

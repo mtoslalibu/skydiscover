@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-Benchmark: Default vs Glia vs Oracle v1 vs v2 BLIS routers.
+Benchmark: Default vs Glia vs Oracle BLIS routers.
 
-Runs all four routers against workload YAMLs and reports E2E mean/P95
+Runs all three routers against workload YAMLs and reports E2E mean/P95
 latency with improvement percentages across multiple seeds.
 
 Algorithms:
-  - Default: Static weighted scoring (prefix-affinity:3, queue-depth:2, kv-utilization:2)
+  - Default: Static weighted scoring (precise-prefix-cache:3, queue-depth:2, kv-utilization:2)
   - Glia HRA: KV-cache headroom allocator (projects block usage, scores by remaining headroom)
-  - Oracle v1: Adaptive affinity decay (decays prefix-affinity weight based on IFR imbalance)
-  - v2: Per-instance IFR penalty (penalizes overloaded instances, preserves idle affinity)
+  - Oracle: Adaptive affinity decay (decays prefix-affinity weight based on IFR imbalance)
 
 Usage:
     python benchmark.py                          # run with defaults (5 seeds, all workloads)
     python benchmark.py --seeds 42,123,456       # custom seeds
-    python benchmark.py --workloads workload_v2.yaml  # single workload
+    python benchmark.py --workloads workload_oracle.yaml  # single workload
     python benchmark.py --instances 4            # custom instance count
 """
 
@@ -30,9 +29,8 @@ BLIS_ROUTER_DIR = SCRIPT_DIR.parent
 SIM_DIR = BLIS_ROUTER_DIR / "inference-sim"
 ROUTING_GO = SIM_DIR / "sim" / "routing.go"
 ORACLE_GO = SCRIPT_DIR / "oracle_router.go"
-ORACLE_V2_GO = SCRIPT_DIR / "oracle_router_v2.go"
 GLIA_GO = SCRIPT_DIR / "baseline_glia.go"
-# Use the local oracle copy of the workload (workload_v1.yaml in this directory).
+# Use the local oracle copy of the workload (workload_oracle.yaml in this directory).
 WORKLOADS_DIR = SCRIPT_DIR
 
 DEFAULT_SEEDS = [42, 123, 456, 789, 1337]
@@ -188,7 +186,7 @@ def run_algo_phase(name: str, binary: Path, workloads: list[Path],
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Benchmark default vs glia vs oracle BLIS router")
+    parser = argparse.ArgumentParser(description="Benchmark default vs Glia vs Oracle BLIS router")
     parser.add_argument("--seeds", default=",".join(str(s) for s in DEFAULT_SEEDS),
                         help="Comma-separated seeds (default: 42,123,456,789,1337)")
     parser.add_argument("--workloads", nargs="*", default=None,
@@ -211,7 +209,6 @@ def main():
 
     # Pre-extract algorithm blocks
     oracle_block = _extract_block(ORACLE_GO, "// ORACLE-START", "// ORACLE-END")
-    v2_block = _extract_block(ORACLE_V2_GO, "// V2-START", "// V2-END")
     glia_block = _extract_block(GLIA_GO, "// GLIA-START", "// GLIA-END")
 
     results = {}
@@ -220,14 +217,14 @@ def main():
 
     # === Phase 1: Default router (no patching) ===
     print("=" * 60)
-    print("Phase 1/4: Default router (pa:3, qd:2, kv:2)")
+    print("Phase 1/3: Default router (ppc:3, qd:2, kv:2)")
     print("=" * 60)
     default_binary = build_blis()
     run_algo_phase("default", default_binary, workloads, seeds, args.instances, results, "default")
 
     # === Phase 2: Glia HRA (patch + rebuild) ===
     print(f"\n{'=' * 60}")
-    print("Phase 2/4: Glia HRA (KV headroom allocator)")
+    print("Phase 2/3: Glia HRA (KV headroom allocator)")
     print("=" * 60)
     print("Patching routing.go with Glia...")
     original = patch_routing_go(glia_block)
@@ -238,45 +235,31 @@ def main():
         print("\nRestoring routing.go...")
         restore_routing_go(original)
 
-    # === Phase 3: Oracle v1 (patch + rebuild) ===
+    # === Phase 3: Oracle (patch + rebuild) ===
     print(f"\n{'=' * 60}")
-    print("Phase 3/4: Oracle v1 (global IFR-based affinity decay)")
+    print("Phase 3/3: Oracle (global IFR-based affinity decay)")
     print("=" * 60)
-    print("Patching routing.go with Oracle v1...")
+    print("Patching routing.go with Oracle...")
     original = patch_routing_go(oracle_block)
     try:
         oracle_binary = build_blis()
-        run_algo_phase("oracle_v1", oracle_binary, workloads, seeds, args.instances, results, "oracle_v1")
-    finally:
-        print("\nRestoring routing.go...")
-        restore_routing_go(original)
-
-    # === Phase 4: v2 per-instance IFR penalty (patch + rebuild) ===
-    print(f"\n{'=' * 60}")
-    print("Phase 4/4: v2 (per-instance IFR penalty)")
-    print("=" * 60)
-    print("Patching routing.go with v2...")
-    original = patch_routing_go(v2_block)
-    try:
-        v2_binary = build_blis()
-        run_algo_phase("v2", v2_binary, workloads, seeds, args.instances, results, "v2")
+        run_algo_phase("oracle", oracle_binary, workloads, seeds, args.instances, results, "oracle")
     finally:
         print("\nRestoring routing.go...")
         restore_routing_go(original)
         build_blis()  # rebuild clean binary
 
     # === Report ===
-    algos = ["default", "glia", "oracle_v1", "v2"]
+    algos = ["default", "glia", "oracle"]
     algo_labels = {
         "default": "Default (3:2:2)",
         "glia": "Glia HRA",
-        "oracle_v1": "Oracle v1",
-        "v2": "v2 (IFR penalty)",
+        "oracle": "Oracle",
     }
 
     print("\n")
     print("=" * 120)
-    print("RESULTS: Default vs Glia vs Oracle v1 vs v2")
+    print("RESULTS: Default vs Glia vs Oracle")
     print("=" * 120)
 
     for wl_name, seed_results in results.items():

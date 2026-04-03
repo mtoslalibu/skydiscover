@@ -5,7 +5,7 @@ priority:
 routing:
   policy: weighted
   scorers:
-  - name: prefix-affinity
+  - name: precise-prefix-cache
     weight: 3.0
   - name: queue-depth
     weight: 2.0
