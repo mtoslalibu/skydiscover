@@ -1,0 +1,145 @@
+# workload_v2: Large-prefix workload for maximum affinity-first benefit.
+#
+# Design: 4 prefix groups across 4 instances at 80 QPS. Large 40960-token
+# prefixes mean cache misses are extremely expensive (~40K tokens of prefill
+# vs ~200 tokens with a hit). This makes cache-aware routing critical:
+# Glia's KV-based routing actively routes AWAY from cached instances (higher
+# KV usage = lower score), causing systematic cache misses. The affinity-first
+# v2 algorithm preserves cache affinity during calm periods and only redirects
+# during bursts via IFR penalty.
+#
+# Why Glia loses: With 40K-token prefixes, each cached instance holds ~2560
+# blocks (40960/16). Glia's projectedUsage/totalBlocks term penalizes these
+# instances by ~4.3% (2560/60000). Since 0.001*queueLoad only contributes
+# ~0.01 for queue=10, KV dominates by ~400x. Glia systematically avoids
+# cached instances, forcing full 40K-token prefill on every request.
+#
+# Config: 4 instances, 80 QPS, qwen_7b, H100 TP=1, snapshot_refresh=5s
+
+version: "2"
+seed: 42
+category: language
+aggregate_rate: 80.0
+num_requests: 2500
+
+clients:
+  # === GROUP ALPHA: 30%, CV=8, large prefix (dominant) ===
+  - id: "group-alpha"
+    slo_class: "batch"
+    rate_fraction: 0.30
+    streaming: false
+    arrival:
+      process: gamma
+      cv: 8.0
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 200
+        std_dev: 60
+        min: 30
+        max: 400
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 30
+        std_dev: 12
+        min: 5
+        max: 60
+    prefix_group: "group-alpha"
+    prefix_length: 40960
+
+  # === GROUP BETA: 25%, CV=6, large prefix ===
+  - id: "group-beta"
+    slo_class: "standard"
+    rate_fraction: 0.25
+    streaming: true
+    arrival:
+      process: gamma
+      cv: 6.0
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 180
+        std_dev: 50
+        min: 25
+        max: 350
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 25
+        std_dev: 10
+        min: 5
+        max: 55
+    prefix_group: "group-beta"
+    prefix_length: 40960
+
+  # === GROUP GAMMA: 20%, CV=5, large prefix ===
+  - id: "group-gamma"
+    slo_class: "standard"
+    rate_fraction: 0.20
+    streaming: true
+    arrival:
+      process: gamma
+      cv: 5.0
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 160
+        std_dev: 45
+        min: 20
+        max: 300
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 20
+        std_dev: 8
+        min: 5
+        max: 50
+    prefix_group: "group-gamma"
+    prefix_length: 40960
+
+  # === GROUP DELTA: 15%, Poisson, large prefix ===
+  - id: "group-delta"
+    slo_class: "standard"
+    rate_fraction: 0.15
+    streaming: true
+    arrival:
+      process: poisson
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 140
+        std_dev: 40
+        min: 15
+        max: 280
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 20
+        std_dev: 8
+        min: 5
+        max: 45
+    prefix_group: "group-delta"
+    prefix_length: 40960
+
+  # === COLD: 10%, no prefix ===
+  - id: "cold"
+    slo_class: "standard"
+    rate_fraction: 0.10
+    streaming: true
+    arrival:
+      process: poisson
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 120
+        std_dev: 35
+        min: 10
+        max: 250
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 15
+        std_dev: 6
+        min: 3
+        max: 40
