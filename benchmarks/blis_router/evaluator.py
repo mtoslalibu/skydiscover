@@ -50,10 +50,10 @@ WORKLOADS = [
 
 # Model configs: (short_name, model_id, extra CLI args)
 _MODEL_QWEN_7B = ("qwen_7b", "qwen/qwen2.5-7b-instruct", [
-    "--hardware", "H100", "--tp", "1",
+    "--hardware", "H100", "--tp", "1", "--latency-model", "blackbox",
 ])
 _MODEL_QWEN_14B = ("qwen_14b", "qwen/qwen3-14b", [
-    "--hardware", "H100", "--tp", "1",
+    "--hardware", "H100", "--tp", "1", "--latency-model", "blackbox",
 ])
 
 _DEFAULT_SEEDS = ["42", "456"]
@@ -95,7 +95,7 @@ def _build_sim_cmd(
     model_id: str, extra_args: list[str], seed: str,
 ) -> list[str]:
     return [
-        "./simulation_worker", "run",
+        "./blis", "run",
         "--model", model_id,
         "--num-instances", SIM_NUM_INSTANCES,
         "--policy-config", str(policy_config_path),
@@ -337,7 +337,7 @@ def get_or_compute_baseline(
         routing_go_path.write_text(go_code)
 
         build_result = subprocess.run(
-            ["go", "build", "-o", "simulation_worker", "main.go"],
+            ["go", "build", "-o", "blis", "main.go"],
             cwd=inference_sim_dir, capture_output=True, text=True, timeout=60,
         )
         if build_result.returncode != 0:
@@ -457,7 +457,7 @@ def evaluate(program_path: str) -> dict:
 
         try:
             result = subprocess.run(
-                ["go", "build", "-o", "simulation_worker", "main.go"],
+                ["go", "build", "-o", "blis", "main.go"],
                 cwd=inference_sim_dir, capture_output=True, text=True, timeout=60,
             )
             if result.returncode != 0:

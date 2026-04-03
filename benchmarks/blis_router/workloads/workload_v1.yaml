@@ -1,0 +1,140 @@
+# workload_v1: Stress-test for default BLIS router (pa:3, qd:2, kv:2)
+#
+# Design:
+#   5 prefix groups across 4 instances. One dominant group (60%) with CV=10 gamma
+#   bursts. During spikes, the default router's prefix-affinity funnels everything
+#   to one instance. The stale QD/KV can't redistribute fast enough.
+#
+#   Key: moderate total load (50 QPS) so the cluster isn't saturated overall,
+#   but the burst group creates extreme imbalance during spikes.
+#   Short outputs keep per-request cost low -> more requests hit the queue.
+#
+# Config: 4 instances, 50 QPS, qwen_7b, H100 TP=1, snapshot_refresh=5s
+
+version: "2"
+seed: 42
+category: language
+aggregate_rate: 55.0
+num_requests: 2500
+
+clients:
+  # === DOMINANT GROUP: 60% of traffic, extreme burstiness ===
+  # Large input tokens (mean=600) + long prefix (14336) = heavy per-request load.
+  # CV=10 gamma bursts send many requests simultaneously to the cached instance.
+  - id: "dominant"
+    slo_class: "batch"
+    rate_fraction: 0.65
+    streaming: false
+    arrival:
+      process: gamma
+      cv: 10.0
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 600
+        std_dev: 200
+        min: 100
+        max: 1500
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 40
+        std_dev: 15
+        min: 5
+        max: 100
+    prefix_group: "group-alpha"
+    prefix_length: 14336
+
+  # === SECONDARY GROUPS: spread across other instances ===
+  - id: "secondary-beta"
+    slo_class: "standard"
+    rate_fraction: 0.10
+    streaming: true
+    arrival:
+      process: gamma
+      cv: 2.0
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 200
+        std_dev: 60
+        min: 30
+        max: 500
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 50
+        std_dev: 20
+        min: 8
+        max: 130
+    prefix_group: "group-beta"
+    prefix_length: 12288
+
+  - id: "secondary-gamma"
+    slo_class: "standard"
+    rate_fraction: 0.10
+    streaming: true
+    arrival:
+      process: gamma
+      cv: 2.0
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 180
+        std_dev: 55
+        min: 30
+        max: 450
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 45
+        std_dev: 18
+        min: 8
+        max: 120
+    prefix_group: "group-gamma"
+    prefix_length: 12288
+
+  - id: "secondary-delta"
+    slo_class: "standard"
+    rate_fraction: 0.07
+    streaming: true
+    arrival:
+      process: poisson
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 160
+        std_dev: 50
+        min: 25
+        max: 400
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 40
+        std_dev: 15
+        min: 5
+        max: 100
+    prefix_group: "group-delta"
+    prefix_length: 12288
+
+  # === COLD TRAFFIC: no prefix ===
+  - id: "cold"
+    slo_class: "standard"
+    rate_fraction: 0.08
+    streaming: true
+    arrival:
+      process: poisson
+    input_distribution:
+      type: gaussian
+      params:
+        mean: 150
+        std_dev: 50
+        min: 20
+        max: 400
+    output_distribution:
+      type: gaussian
+      params:
+        mean: 35
+        std_dev: 12
+        min: 5
+        max: 90
